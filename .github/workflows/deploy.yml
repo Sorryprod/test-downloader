@@ -1,0 +1,69 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH (password)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            APP_DIR="${{ secrets.REMOTE_APP_DIR }}"
+            if [ -z "$APP_DIR" ]; then
+              APP_DIR="/root/test-downloader"
+            fi
+
+            APP_PORT="${{ secrets.APP_HOST_PORT }}"
+            if [ -z "$APP_PORT" ]; then
+              APP_PORT="8088"
+            fi
+
+            REPO_URL="${{ secrets.GIT_REPO_URL }}"
+            if [ -z "$REPO_URL" ]; then
+              REPO_URL="https://github.com/Sorryprod/test-downloader.git"
+            fi
+
+            mkdir -p "$APP_DIR"
+            cd "$APP_DIR"
+
+            if [ ! -d .git ]; then
+              # Каталог мог быть создан пустым — клонируем публичный репозиторий
+              if [ -z "$(ls -A "$APP_DIR" 2>/dev/null || true)" ]; then
+                git clone "$REPO_URL" "$APP_DIR"
+              else
+                git clone "$REPO_URL" /tmp/test-downloader-clone
+                cp -a /tmp/test-downloader-clone/. "$APP_DIR"/
+                rm -rf /tmp/test-downloader-clone
+              fi
+              cd "$APP_DIR"
+            fi
+
+            git remote set-url origin "$REPO_URL" || true
+            git fetch --all
+            git checkout main 2>/dev/null || git checkout master 2>/dev/null || true
+            git reset --hard origin/main 2>/dev/null || git reset --hard origin/master
+
+            if [ ! -f .env ]; then
+              cp .env.example .env
+              echo "WARN: создан .env из example — проверь X_CANDIDATE_ID и CORS_ORIGINS на сервере"
+            fi
+
+            export APP_HOST_PORT="$APP_PORT"
+            docker compose up -d --build
+            docker compose ps

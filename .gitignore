@@ -1,0 +1,42 @@
+# Внутренние материалы задания (не коммитить)
+task.md
+plan.md
+
+# Секреты и локальный конфиг
+.env
+.env.*
+!.env.example
+scripts/deploy.env
+
+# SSH / ключи (на всякий случай)
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+
+# Python
+backend/.venv/
+backend/**/__pycache__/
+backend/**/*.py[cod]
+backend/.pytest_cache/
+backend/data/
+backend/*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Локальные артефакты smoke-теста
+scripts/_last_download.zip
+
+# IDE / OS / Cursor
+.idea/
+.vscode/
+.cursor/
+*.swp
+.DS_Store
+Thumbs.db
