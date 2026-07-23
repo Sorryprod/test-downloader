@@ -125,6 +125,19 @@ a {
   color: var(--accent-ink);
 }
 
+.topbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.btn-accent {
+  border-color: #1f6f8b;
+  background: #1f6f8b;
+  color: #f4fbff;
+}
+
 .status-panel,
 .panel {
   margin-top: 1rem;

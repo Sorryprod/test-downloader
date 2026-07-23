@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 NSK = ZoneInfo("Asia/Novosibirsk")
 
 ProgressCallback = Callable[[DownloadJob], Awaitable[None]]
+ShouldPauseCallback = Callable[[], bool]
+
+
+class DownloadPaused(Exception):
+    """Кооперативная пауза download-job."""
 
 
 def format_nsk(dt: datetime | None) -> str | None:
@@ -39,6 +44,11 @@ def extract_text_files_from_zip(zip_bytes: bytes) -> dict[str, str]:
     return result
 
 
+def is_empty_names_payload(names: list[str] | None) -> bool:
+    """Пустой список имён = каталог полностью отмечен скачанным (по контракту API)."""
+    return names is not None and len(names) == 0
+
+
 class DownloadService:
     def __init__(
         self,
@@ -52,28 +62,45 @@ class DownloadService:
         self,
         job_id: int,
         on_progress: ProgressCallback | None = None,
-    ) -> None:
+        should_pause: ShouldPauseCallback | None = None,
+        *,
+        resume: bool = False,
+    ) -> str:
+        """Возвращает 'completed' | 'paused' | 'failed'."""
         async with self._session_factory() as session:
             job = await session.get(DownloadJob, job_id)
             if job is None:
-                return
+                return "failed"
 
             job.status = JobStatus.RUNNING
-            job.started_at = datetime.now(tz=NSK)
-            job.message = "Старт скачивания каталога"
+            if not resume or job.started_at is None:
+                job.started_at = datetime.now(tz=NSK)
+            job.finished_at = None
+            job.message = "Продолжение скачивания" if resume else "Старт скачивания каталога"
             job.error = None
             await session.commit()
             await self._emit(session, job, on_progress)
 
             try:
-                await self._download_all(session, job, on_progress)
+                await self._download_all(session, job, on_progress, should_pause)
                 job.status = JobStatus.COMPLETED
                 job.finished_at = datetime.now(tz=NSK)
                 job.message = (
-                    f"Каталог скачан полностью. Всего файлов: {job.total_downloaded}"
+                    f"Каталог скачан полностью (пустой список имён от API). "
+                    f"Уникальных файлов за сессию: {job.total_downloaded}"
                 )
                 await session.commit()
                 await self._emit(session, job, on_progress)
+                return "completed"
+            except DownloadPaused:
+                job.status = JobStatus.PAUSED
+                job.message = (
+                    f"Скачивание приостановлено. Уникальных файлов за сессию: "
+                    f"{job.total_downloaded}"
+                )
+                await session.commit()
+                await self._emit(session, job, on_progress)
+                return "paused"
             except Exception as exc:
                 logger.exception("Download job %s failed", job_id)
                 job.status = JobStatus.FAILED
@@ -82,6 +109,7 @@ class DownloadService:
                 job.message = "Ошибка скачивания"
                 await session.commit()
                 await self._emit(session, job, on_progress)
+                return "failed"
 
     async def _emit(
         self,
@@ -106,13 +134,17 @@ class DownloadService:
         job.message = message
         await session.commit()
         await self._emit(session, job, on_progress)
-        # Фактический sleep делает клиент; здесь только статус для UI
+
+    def _check_pause(self, should_pause: ShouldPauseCallback | None) -> None:
+        if should_pause is not None and should_pause():
+            raise DownloadPaused()
 
     async def _download_all(
         self,
         session: AsyncSession,
         job: DownloadJob,
         on_progress: ProgressCallback | None,
+        should_pause: ShouldPauseCallback | None,
     ) -> None:
         async def on_waiting(message: str, retry_after: float, status_code: int) -> None:
             await self._on_waiting(
@@ -120,8 +152,21 @@ class DownloadService:
             )
 
         while True:
+            self._check_pause(should_pause)
+
             names = await self._client.get_file_names(on_waiting=on_waiting)
-            if not names:
+            logger.info(
+                "Job %s: GET /names → %s имён (candidate=%s)",
+                job.id,
+                len(names),
+                self._client.candidate_headers.get("X-Candidate-Id"),
+            )
+
+            if is_empty_names_payload(names):
+                logger.info(
+                    "Job %s: пустой file_names [] — каталог полностью скачан",
+                    job.id,
+                )
                 job.names_received = 0
                 job.downloaded_in_batch = 0
                 if job.status == JobStatus.WAITING_RATE_LIMIT:
@@ -142,6 +187,7 @@ class DownloadService:
             await self._emit(session, job, on_progress)
 
             for offset in range(0, len(names), 3):
+                self._check_pause(should_pause)
                 batch = names[offset : offset + 3]
                 await self._download_and_mark_batch(
                     session, job, batch, on_progress, on_waiting
@@ -165,7 +211,7 @@ class DownloadService:
                 status_code=None,
             )
 
-        saved_names: list[str] = []
+        new_files = 0
         for filename in batch:
             content = extracted[filename]
             existing = await session.scalar(
@@ -177,20 +223,29 @@ class DownloadService:
                         filename=filename,
                         content=content,
                         downloaded_at=datetime.now(tz=NSK),
+                        job_id=job.id,
                     )
                 )
+                new_files += 1
             else:
                 existing.content = content
                 existing.downloaded_at = datetime.now(tz=NSK)
-            saved_names.append(filename)
+                existing.job_id = job.id
 
         await session.flush()
 
-        # Mark после успешного сохранения — строгий порядок из ТЗ
-        await self._client.mark_downloaded(saved_names, on_waiting=on_waiting)
+        mark_result = await self._client.mark_downloaded(batch, on_waiting=on_waiting)
+        logger.info(
+            "Job %s: mark %s → marked_now=%s already_marked=%s new_local=%s",
+            job.id,
+            batch,
+            mark_result.marked_now,
+            mark_result.already_marked,
+            new_files,
+        )
 
-        job.downloaded_in_batch += len(saved_names)
-        job.total_downloaded += len(saved_names)
+        job.downloaded_in_batch += len(batch)
+        job.total_downloaded += new_files
         job.status = JobStatus.RUNNING
         job.message = (
             f"Получено {job.names_received} названий файлов, "

@@ -13,6 +13,8 @@ from app.services.job_manager import JobManager, job_to_progress
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
+TERMINAL_SSE = frozenset({"completed", "failed", "paused"})
+
 
 def get_job_manager(request: Request) -> JobManager:
     return request.app.state.job_manager
@@ -24,6 +26,34 @@ async def start_download(
 ) -> JobCreateResponse:
     job = await job_manager.start_job()
     return JobCreateResponse(job_id=job.id, status=job.status)
+
+
+@router.post("/{job_id}/pause", response_model=JobProgress)
+async def pause_download(
+    job_id: int,
+    job_manager: JobManager = Depends(get_job_manager),
+) -> JobProgress:
+    try:
+        job = await job_manager.pause_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job не найден") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job_to_progress(job)
+
+
+@router.post("/{job_id}/resume", response_model=JobProgress)
+async def resume_download(
+    job_id: int,
+    job_manager: JobManager = Depends(get_job_manager),
+) -> JobProgress:
+    try:
+        job = await job_manager.resume_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job не найден") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job_to_progress(job)
 
 
 @router.get("/{job_id}", response_model=JobProgress)
@@ -54,9 +84,8 @@ async def job_events(
                 break
             payload = progress.model_dump(mode="json")
             yield f"event: progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            if progress.status in ("completed", "failed"):
+            if progress.status in TERMINAL_SSE:
                 break
-            # Даем event loop обработать другие задачи
             await asyncio.sleep(0)
 
     return StreamingResponse(

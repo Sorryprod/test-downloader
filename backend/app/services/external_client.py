@@ -183,7 +183,23 @@ class ExternalFilesClient:
     async def get_file_names(self, *, on_waiting: Any | None = None) -> list[str]:
         response = await self._request("GET", "/api/files/names", on_waiting=on_waiting)
         payload = response.json()
-        return list(payload.get("file_names", []))
+        if "file_names" not in payload:
+            raise ExternalApiError(
+                f"Некорректный ответ /names: нет поля file_names ({payload!r})",
+                status_code=response.status_code,
+            )
+        raw = payload["file_names"]
+        if raw is None:
+            raise ExternalApiError(
+                "Некорректный ответ /names: file_names=null",
+                status_code=response.status_code,
+            )
+        if not isinstance(raw, list):
+            raise ExternalApiError(
+                f"Некорректный ответ /names: file_names не список ({type(raw)!r})",
+                status_code=response.status_code,
+            )
+        return [str(name) for name in raw]
 
     async def download_files(
         self,

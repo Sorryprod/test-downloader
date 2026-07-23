@@ -6,7 +6,7 @@ import pytest
 import respx
 
 from app.core.config import Settings
-from app.services.downloader import extract_text_files_from_zip
+from app.services.downloader import extract_text_files_from_zip, is_empty_names_payload
 from app.services.external_client import ExternalFilesClient, RateLimitedError
 from app.services.stats import count_digits, merge_digit_counts
 
@@ -45,6 +45,12 @@ def test_extract_text_files_from_zip() -> None:
     extracted = extract_text_files_from_zip(buffer.getvalue())
     assert extracted["a.txt"] == "123"
     assert extracted["b.txt"] == "456"
+
+
+def test_empty_names_payload() -> None:
+    assert is_empty_names_payload([]) is True
+    assert is_empty_names_payload(["a.txt"]) is False
+    assert is_empty_names_payload(None) is False
 
 
 @pytest.mark.asyncio

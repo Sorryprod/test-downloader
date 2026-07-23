@@ -10,7 +10,10 @@ import {
 
 type OutletContext = {
   refreshToken: number;
+  activeJobId: number | null;
 };
+
+type SelectionMode = "none" | "page" | "all" | "session";
 
 function formatDateTime(value: string): string {
   const date = new Date(value);
@@ -22,14 +25,14 @@ function formatDateTime(value: string): string {
 }
 
 export function FilesPage() {
-  const { refreshToken } = useOutletContext<OutletContext>();
+  const { refreshToken, activeJobId } = useOutletContext<OutletContext>();
   const [page, setPage] = useState(1);
   const [pageSize] = useState(20);
   const [items, setItems] = useState<FileItem[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [selectAllCatalog, setSelectAllCatalog] = useState(false);
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>("none");
   const [stats, setStats] = useState<CalculateResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isCalculating, setIsCalculating] = useState(false);
@@ -58,10 +61,13 @@ export function FilesPage() {
 
   const pageIds = useMemo(() => items.map((item) => item.id), [items]);
   const isPageFullySelected =
-    pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
+    selectionMode !== "all" &&
+    selectionMode !== "session" &&
+    pageIds.length > 0 &&
+    pageIds.every((id) => selectedIds.has(id));
 
   const toggleOne = (id: number) => {
-    setSelectAllCatalog(false);
+    setSelectionMode("none");
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -74,7 +80,7 @@ export function FilesPage() {
   };
 
   const togglePage = () => {
-    setSelectAllCatalog(false);
+    setSelectionMode("page");
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (isPageFullySelected) {
@@ -87,18 +93,29 @@ export function FilesPage() {
   };
 
   const toggleAllCatalog = () => {
-    const next = !selectAllCatalog;
-    setSelectAllCatalog(next);
-    if (next) {
-      setSelectedIds(new Set(pageIds));
-    } else {
-      setSelectedIds(new Set());
+    const enable = selectionMode !== "all";
+    setSelectionMode(enable ? "all" : "none");
+    setSelectedIds(enable ? new Set(pageIds) : new Set());
+  };
+
+  const toggleSession = () => {
+    if (!activeJobId) {
+      setError("Нет активной сессии скачивания — сначала запустите «Скачать данные»");
+      return;
     }
+    const enable = selectionMode !== "session";
+    setSelectionMode(enable ? "session" : "none");
+    setSelectedIds(new Set());
+    setError(null);
   };
 
   const handleCalculate = async () => {
-    if (!selectAllCatalog && selectedIds.size === 0) {
+    if (selectionMode === "none" && selectedIds.size === 0) {
       setError("Выберите хотя бы один файл");
+      return;
+    }
+    if (selectionMode === "session" && !activeJobId) {
+      setError("Нет job_id сессии для расчёта");
       return;
     }
 
@@ -106,8 +123,13 @@ export function FilesPage() {
     setError(null);
     try {
       const result = await calculateStats({
-        file_ids: selectAllCatalog ? [] : Array.from(selectedIds),
-        select_all: selectAllCatalog,
+        file_ids:
+          selectionMode === "all" || selectionMode === "session"
+            ? []
+            : Array.from(selectedIds),
+        select_all: selectionMode === "all",
+        select_session: selectionMode === "session",
+        job_id: selectionMode === "session" ? activeJobId : null,
       });
       setStats(result);
     } catch (err) {
@@ -117,7 +139,15 @@ export function FilesPage() {
     }
   };
 
+  const selectionLabel =
+    selectionMode === "all"
+      ? `все в каталоге (${total})`
+      : selectionMode === "session"
+        ? `все за сессию #${activeJobId}`
+        : String(selectedIds.size);
+
   const digitKeys = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+  const bulkSelected = selectionMode === "all" || selectionMode === "session";
 
   return (
     <section className="panel">
@@ -140,24 +170,31 @@ export function FilesPage() {
         <label>
           <input
             type="checkbox"
-            checked={isPageFullySelected && !selectAllCatalog}
+            checked={isPageFullySelected}
             onChange={togglePage}
-            disabled={items.length === 0}
+            disabled={items.length === 0 || bulkSelected}
           />
           Все на странице
         </label>
         <label>
           <input
             type="checkbox"
-            checked={selectAllCatalog}
+            checked={selectionMode === "all"}
             onChange={toggleAllCatalog}
             disabled={total === 0}
           />
           Вообще все ({total})
         </label>
-        <span className="muted">
-          Выбрано: {selectAllCatalog ? `все ${total}` : selectedIds.size}
-        </span>
+        <label>
+          <input
+            type="checkbox"
+            checked={selectionMode === "session"}
+            onChange={toggleSession}
+            disabled={!activeJobId}
+          />
+          Все за сессию{activeJobId ? ` (#${activeJobId})` : ""}
+        </label>
+        <span className="muted">Выбрано: {selectionLabel}</span>
       </div>
 
       {error && <p className="error-text">{error}</p>}
@@ -169,6 +206,7 @@ export function FilesPage() {
             <tr>
               <th></th>
               <th>Имя файла</th>
+              <th>Сессия</th>
               <th>Время скачивания (НСК)</th>
             </tr>
           </thead>
@@ -178,20 +216,21 @@ export function FilesPage() {
                 <td>
                   <input
                     type="checkbox"
-                    checked={selectAllCatalog || selectedIds.has(item.id)}
+                    checked={bulkSelected || selectedIds.has(item.id)}
                     onChange={() => toggleOne(item.id)}
-                    disabled={selectAllCatalog}
+                    disabled={bulkSelected}
                   />
                 </td>
                 <td>
                   <code>{item.filename}</code>
                 </td>
+                <td className="muted">{item.job_id ?? "—"}</td>
                 <td>{formatDateTime(item.downloaded_at)}</td>
               </tr>
             ))}
             {!isLoading && items.length === 0 && (
               <tr>
-                <td colSpan={3} className="muted">
+                <td colSpan={4} className="muted">
                   Файлов пока нет — сначала выполните скачивание.
                 </td>
               </tr>

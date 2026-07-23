@@ -24,6 +24,7 @@ class FileItem(BaseModel):
     id: int
     filename: str
     downloaded_at: datetime
+    job_id: int | None = None
 
 
 class FileListResponse(BaseModel):
@@ -37,6 +38,8 @@ class FileListResponse(BaseModel):
 class CalculateRequest(BaseModel):
     file_ids: list[int] = Field(default_factory=list)
     select_all: bool = False
+    select_session: bool = False
+    job_id: int | None = None
 
 
 class FileDigitStats(BaseModel):

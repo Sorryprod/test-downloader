@@ -3,6 +3,8 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 
 import {
   getJob,
+  pauseDownloadJob,
+  resumeDownloadJob,
   startDownloadJob,
   subscribeJobEvents,
   type JobProgress,
@@ -14,6 +16,8 @@ export function Layout() {
   const location = useLocation();
   const [progress, setProgress] = useState<JobProgress | null>(null);
   const [isStarting, setIsStarting] = useState(false);
+  const [isPausing, setIsPausing] = useState(false);
+  const [isResuming, setIsResuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
 
@@ -52,8 +56,43 @@ export function Layout() {
     }
   };
 
+  const handlePause = async () => {
+    if (!progress || !ACTIVE_STATUSES.has(progress.status)) {
+      return;
+    }
+    setIsPausing(true);
+    setError(null);
+    try {
+      const updated = await pauseDownloadJob(progress.job_id);
+      setProgress(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsPausing(false);
+    }
+  };
+
+  const handleResume = async () => {
+    if (!progress || progress.status !== "paused") {
+      return;
+    }
+    setIsResuming(true);
+    setError(null);
+    try {
+      const updated = await resumeDownloadJob(progress.job_id);
+      setProgress(updated);
+      attachToJob(updated.job_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsResuming(false);
+    }
+  };
+
   const isBusy =
     isStarting || (progress !== null && ACTIVE_STATUSES.has(progress.status));
+  const canPause = Boolean(progress && ACTIVE_STATUSES.has(progress.status));
+  const canResume = progress?.status === "paused";
 
   return (
     <div className="app-shell">
@@ -78,14 +117,32 @@ export function Layout() {
           </Link>
         </nav>
 
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={handleDownload}
-          disabled={isBusy}
-        >
-          {isBusy ? "Скачивание…" : "Скачать данные"}
-        </button>
+        <div className="topbar-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleDownload}
+            disabled={isBusy || canResume}
+          >
+            {isBusy ? "Скачивание…" : "Скачать данные"}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={handlePause}
+            disabled={!canPause || isPausing}
+          >
+            {isPausing ? "Пауза…" : "Стоп"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-accent"
+            onClick={handleResume}
+            disabled={!canResume || isResuming}
+          >
+            {isResuming ? "Продолжаем…" : "Продолжить"}
+          </button>
+        </div>
       </header>
 
       {(progress || error) && (
@@ -108,7 +165,7 @@ export function Layout() {
             <p className="status-message">
               Статус: <code>{progress.status}</code> — {progress.message}
               {progress.total_downloaded > 0 && (
-                <> (всего за сессию: {progress.total_downloaded})</>
+                <> (уникальных за сессию: {progress.total_downloaded})</>
               )}
             </p>
           )}
@@ -117,7 +174,12 @@ export function Layout() {
       )}
 
       <main className="page">
-        <Outlet context={{ refreshToken: progress?.total_downloaded ?? 0 }} />
+        <Outlet
+          context={{
+            refreshToken: progress?.total_downloaded ?? 0,
+            activeJobId: progress?.job_id ?? null,
+          }}
+        />
       </main>
     </div>
   );

@@ -14,6 +14,7 @@ export type FileItem = {
   id: number;
   filename: string;
   downloaded_at: string;
+  job_id: number | null;
 };
 
 export type FileListResponse = {
@@ -54,6 +55,22 @@ export async function startDownloadJob(): Promise<{ job_id: number; status: stri
   return response.json();
 }
 
+export async function pauseDownloadJob(jobId: number): Promise<JobProgress> {
+  const response = await fetch(`/api/jobs/${jobId}/pause`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
+export async function resumeDownloadJob(jobId: number): Promise<JobProgress> {
+  const response = await fetch(`/api/jobs/${jobId}/resume`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  return response.json();
+}
+
 export async function getJob(jobId: number): Promise<JobProgress> {
   const response = await fetch(`/api/jobs/${jobId}`);
   if (!response.ok) {
@@ -73,7 +90,11 @@ export function subscribeJobEvents(
     try {
       const data = JSON.parse((event as MessageEvent).data) as JobProgress;
       onProgress(data);
-      if (data.status === "completed" || data.status === "failed") {
+      if (
+        data.status === "completed" ||
+        data.status === "failed" ||
+        data.status === "paused"
+      ) {
         source.close();
       }
     } catch (error) {
@@ -103,6 +124,8 @@ export async function listFiles(page: number, pageSize: number): Promise<FileLis
 export async function calculateStats(payload: {
   file_ids: number[];
   select_all: boolean;
+  select_session?: boolean;
+  job_id?: number | null;
 }): Promise<CalculateResponse> {
   const response = await fetch("/api/files/calculate", {
     method: "POST",

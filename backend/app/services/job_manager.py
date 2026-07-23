@@ -5,6 +5,7 @@ import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import DownloadJob, JobStatus
@@ -43,20 +44,17 @@ class JobManager:
             list
         )
         self._tasks: dict[int, asyncio.Task[None]] = {}
+        self._pause_requested: set[int] = set()
         self._lock = asyncio.Lock()
+
+    def _is_pause_requested(self, job_id: int) -> bool:
+        return job_id in self._pause_requested
 
     async def start_job(self) -> DownloadJob:
         async with self._lock:
-            running = [
-                task
-                for task in self._tasks.values()
-                if not task.done()
-            ]
+            running = [task for task in self._tasks.values() if not task.done()]
             if running:
                 async with self._session_factory() as session:
-                    # Вернём активный job, если есть
-                    from sqlalchemy import select
-
                     result = await session.scalar(
                         select(DownloadJob)
                         .where(
@@ -83,14 +81,87 @@ class JobManager:
                 await session.refresh(job)
                 job_id = job.id
 
-            task = asyncio.create_task(self._run(job_id), name=f"download-job-{job_id}")
+            self._pause_requested.discard(job_id)
+            task = asyncio.create_task(
+                self._run(job_id, resume=False),
+                name=f"download-job-{job_id}",
+            )
             self._tasks[job_id] = task
             return job
 
-    async def _run(self, job_id: int) -> None:
+    async def pause_job(self, job_id: int) -> DownloadJob:
+        async with self._session_factory() as session:
+            job = await session.get(DownloadJob, job_id)
+            if job is None:
+                raise KeyError("job_not_found")
+            if job.status not in (
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+                JobStatus.WAITING_RATE_LIMIT,
+            ):
+                raise ValueError(f"Нельзя поставить на паузу статус {job.status}")
+
+        self._pause_requested.add(job_id)
+        task = self._tasks.get(job_id)
+        if task is not None and not task.done():
+            # Ждём кооперативной остановки (с таймаутом на случай долгого Retry-After)
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+
+        async with self._session_factory() as session:
+            job = await session.get(DownloadJob, job_id)
+            if job is None:
+                raise KeyError("job_not_found")
+            if job.status != JobStatus.PAUSED:
+                # Если ещё в rate-limit sleep — пометим paused после выхода; иначе форсим
+                if job.status in (
+                    JobStatus.RUNNING,
+                    JobStatus.WAITING_RATE_LIMIT,
+                    JobStatus.PENDING,
+                ):
+                    job.status = JobStatus.PAUSED
+                    job.message = "Скачивание приостановлено"
+                    await session.commit()
+                    await self.publish(job)
+            return job
+
+    async def resume_job(self, job_id: int) -> DownloadJob:
+        async with self._lock:
+            async with self._session_factory() as session:
+                job = await session.get(DownloadJob, job_id)
+                if job is None:
+                    raise KeyError("job_not_found")
+                if job.status != JobStatus.PAUSED:
+                    raise ValueError(f"Продолжить можно только paused, сейчас {job.status}")
+
+            existing = self._tasks.get(job_id)
+            if existing is not None and not existing.done():
+                return job
+
+            self._pause_requested.discard(job_id)
+            task = asyncio.create_task(
+                self._run(job_id, resume=True),
+                name=f"download-job-{job_id}-resume",
+            )
+            self._tasks[job_id] = task
+
+            async with self._session_factory() as session:
+                job = await session.get(DownloadJob, job_id)
+                assert job is not None
+                return job
+
+    async def _run(self, job_id: int, *, resume: bool) -> None:
         try:
-            await self._download_service.run_job(job_id, on_progress=self.publish)
+            await self._download_service.run_job(
+                job_id,
+                on_progress=self.publish,
+                should_pause=lambda: self._is_pause_requested(job_id),
+                resume=resume,
+            )
         finally:
+            self._pause_requested.discard(job_id)
             await self.publish_terminal(job_id)
 
     async def publish(self, job: DownloadJob) -> None:
@@ -118,7 +189,11 @@ class JobManager:
             if job is None:
                 return
             yield job_to_progress(job)
-            if job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+            if job.status in (
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+                JobStatus.PAUSED,
+            ):
                 return
 
         queue = self.subscribe(job_id)

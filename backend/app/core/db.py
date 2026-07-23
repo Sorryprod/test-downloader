@@ -37,6 +37,14 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     from app import models  # noqa: F401
+    from sqlalchemy import text
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Мягкая миграция для уже существующей БД на сервере
+        await conn.execute(
+            text(
+                "ALTER TABLE downloaded_files "
+                "ADD COLUMN IF NOT EXISTS job_id INTEGER"
+            )
+        )
