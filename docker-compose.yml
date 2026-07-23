@@ -52,6 +52,20 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Публичный туннель без выделенного IP: https://cloudpub.ru/docs/docker
+  cloudpub:
+    image: cloudpub/cloudpub:latest
+    restart: unless-stopped
+    environment:
+      TOKEN: ${CLOUDPUB_TOKEN}
+      HTTP: frontend:80
+    command: run
+    depends_on:
+      - frontend
+    volumes:
+      - cloudpub-config:/home/cloudpub
+
 volumes:
   pgdata:
   files_data:
+  cloudpub-config:

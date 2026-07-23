@@ -52,6 +52,8 @@ pytest
 
 Хост, SSH-порт и пароль хранятся только в **GitHub Secrets** (`SSH_PASSWORD`) и локальном `scripts/deploy.env` (gitignore).
 
+Публичный доступ без выделенного IP — через **CloudPub** (`CLOUDPUB_TOKEN` в `.env` на сервере). URL смотри в логах: `docker compose logs cloudpub`.
+
 Инструкция: **[DEPLOY.md](DEPLOY.md)**
 
 ```powershell
